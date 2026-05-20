@@ -137,35 +137,68 @@ with tab3:
     if pct_match:
         pct_col = pct_match[0]
         
-        # FIX: Safe casting to string to prevent AttributeError on non-string column types
+        # Cast categories cleanly to strings for regex matching
         strategy_categories_str = df_strategy[cat_col].astype(str)
         salary_row = df_strategy[strategy_categories_str.str.contains('Salary|Income', case=False, na=False)]
         
-        base_salary = 130000 
+        # Dynamic fallback initialization
+        fetched_salary = None
+        
         if not salary_row.empty:
-            # Safely look for a column that isn't category or percentage to fetch salary
+            # Find any column that isn't the category text descriptor or the percentage metric
             val_indices = [c for c in df_strategy.columns if c != cat_col and c != pct_col]
             if val_indices:
-                val_idx = val_indices[0]
-                base_salary = pd.to_numeric(salary_row.iloc[0][val_idx], errors='coerce') or 130000
+                # Convert first non-text, non-percentage metric row to numeric scalar value
+                raw_val = salary_row.iloc[0][val_indices[0]]
+                if isinstance(raw_val, str):
+                    raw_val = raw_val.replace('₹', '').replace(',', '').strip()
+                fetched_salary = pd.to_numeric(raw_val, errors='coerce')
 
-        target_invest = st.slider("Modify Monthly Target (₹)", int(base_salary*0.1), int(base_salary*0.9), int(base_salary*0.6), step=2000)
-        st.markdown(f"**Target Breakdown for ₹{target_invest:,}:**")
+        # If a salary row isn't found or parsing fails, fall back to a reasonable base default
+        base_salary = fetched_salary if (fetched_salary and fetched_salary > 0) else 130000
         
-        # Apply identical string safety casting while slicing down non-essential rows
-        strategy_rows = df_strategy[~strategy_categories_str.str.contains('Salary|Expense|Total|Cash', case=False, na=False)]
-        for _, row in strategy_rows.iterrows():
-            raw_pct = row[pct_col]
-            try:
-                if isinstance(raw_pct, str):
-                    pct_val = float(raw_pct.replace('%', '')) / 100 if '%' in raw_pct else float(raw_pct)
-                else:
-                    pct_val = float(raw_pct) if float(raw_pct) <= 1 else float(raw_pct) / 100
-                    
-                calculated_allocation = target_invest * pct_val
-                st.write(f"▪️ **{row[cat_col]} ({pct_val*100:.1f}%):** ₹{calculated_allocation:,.2f}")
-            except Exception:
-                continue
+        # UI controls bound explicitly to your parsed sheet dimensions
+        min_slider = int(base_salary * 0.1)
+        max_slider = int(base_salary * 1.0)
+        default_slider = int(base_salary * 0.5)
+        
+        # Insulate step boundaries just in case bounds collapse on tight margins
+        if min_slider >= max_slider:
+            min_slider, max_slider = 0, int(base_salary)
+            
+        target_invest = st.slider(
+            "Modify Monthly Target (₹)", 
+            min_value=min_slider, 
+            max_value=max_slider, 
+            value=default_slider, 
+            step=1000 if base_salary > 10000 else 100
+        )
+        
+        st.markdown(f"### Target Breakdown for ₹{target_invest:,}:")
+        
+        # Filter down rows to display everything EXCEPT headers/income targets
+        strategy_rows = df_strategy[~strategy_categories_str.str.contains('Salary|Income|Expense Total|Total Financials', case=False, na=False)]
+        
+        if not strategy_rows.empty:
+            for _, row in strategy_rows.iterrows():
+                raw_pct = row[pct_col]
+                try:
+                    if isinstance(raw_pct, str):
+                        pct_val = float(raw_pct.replace('%', '').strip()) / 100 if '%' in raw_pct else float(raw_pct)
+                    else:
+                        pct_val = float(raw_pct) if float(raw_pct) <= 1 else float(raw_pct) / 100
+                        
+                    # Skip rows that are empty or equal to zero
+                    if pct_val <= 0:
+                        continue
+                        
+                    calculated_allocation = target_invest * pct_val
+                    st.write(f"▪️ **{row[cat_col]} ({pct_val*100:.1f}%):** ₹{calculated_allocation:,.2f}")
+                except Exception:
+                    continue
+        else:
+            st.info("No distribution rules discovered. Showing raw configuration structure matrix below.")
+            st.dataframe(df_strategy.set_index(cat_col), use_container_width=True)
     else:
         st.dataframe(df_strategy.set_index(cat_col), use_container_width=True)
 
