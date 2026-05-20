@@ -10,6 +10,11 @@ import re
 import time
 from datetime import datetime
 
+try:
+    import yfinance as yf
+except ImportError:
+    yf = None
+
 logging.basicConfig(
     stream=sys.stdout, level=logging.INFO, format='%(asctime)s [%(levelname)s] - %(message)s'
 )
@@ -39,6 +44,388 @@ def call_gpt(messages, max_tokens=2000):
     except Exception as e:
         logging.error(f"GPT error: {e}")
         return None
+
+def get_yfinance_session():
+    """Create a curl_cffi session to bypass SSL and bot protection."""
+    try:
+        from curl_cffi.requests import Session
+        import urllib3
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        return Session(impersonate="chrome", verify=False)
+    except Exception as e:
+        logging.error(f"Error creating curl_cffi session: {e}")
+        return None
+
+@st.cache_data(ttl=300)
+def fetch_news_real(portfolio_stocks):
+    if yf is None:
+        return []
+    
+    session = get_yfinance_session()
+    articles = []
+    
+    # Clean stock names/symbols and limit to top 5 holdings to keep it fast
+    unique_stocks = []
+    for s in portfolio_stocks:
+        cleaned = str(s).strip().upper()
+        # Remove common suffixes
+        cleaned = re.sub(r"\b(LTD|LIMITED|CORP|CORPORATION|INC|INDUSTRIES|INDS)\b.*", "", cleaned).strip()
+        if cleaned and cleaned not in unique_stocks:
+            unique_stocks.append(cleaned)
+    
+    for stock in unique_stocks[:5]:
+        sym = stock if stock.endswith((".NS", ".BO")) else f"{stock}.NS"
+        try:
+            t = yf.Ticker(sym, session=session)
+            news = t.news
+            if news:
+                for item in news[:2]:  # Get top 2 articles per stock
+                    content = item.get("content", {})
+                    if content.get("title"):
+                        articles.append({
+                            "ticker": stock,
+                            "headline": content.get("title", ""),
+                            "source": content.get("provider", {}).get("displayName", "Yahoo Finance"),
+                            "time": content.get("pubDate", ""),
+                            "summary": content.get("summary", ""),
+                            "url": content.get("clickThroughUrl", {}).get("url", "#")
+                        })
+        except Exception as e:
+            logging.error(f"Error fetching news for {sym}: {e}")
+            
+    # Now, pass this real news list to GPT to get sentiment and a polished summary
+    if not articles:
+        return []
+        
+    prompt = f"""You are a financial news analyst. Analyze the following actual news articles for Indian stocks:
+{json.dumps(articles, indent=2)}
+
+For each article, analyze the headline/summary and:
+1. Classify sentiment as "positive", "negative", or "neutral".
+2. Write a concise 2-sentence summary.
+3. Compute a relative time string (e.g. "2h ago", "1d ago" or a date) based on the publication date.
+
+Return ONLY a JSON array with the same number of objects as input, each having:
+- "ticker": stock symbol
+- "headline": original headline (from input)
+- "source": source name (from input)
+- "time": relative time
+- "summary": your 2-sentence summary
+- "sentiment": "positive", "negative", or "neutral"
+- "url": original URL (from input)
+
+Return ONLY the JSON array, no other text."""
+
+    result = call_gpt([{"role": "user", "content": prompt}], max_tokens=2000)
+    if not result:
+        # Fallback
+        for item in articles:
+            item["sentiment"] = "neutral"
+            item["time"] = item["time"][:10] if item["time"] else "Today"
+        return articles
+        
+    try:
+        clean = result.strip()
+        if clean.startswith("```"):
+            clean = re.sub(r"```json?|```", "", clean).strip()
+        return json.loads(clean)
+    except Exception as e:
+        logging.error(f"Error parsing news sentiment: {e}")
+        for item in articles:
+            item["sentiment"] = "neutral"
+            item["time"] = item["time"][:10] if item["time"] else "Today"
+        return articles
+
+@st.cache_data(ttl=600)
+def fetch_fundamentals_real(portfolio_stocks):
+    if yf is None:
+        return []
+        
+    session = get_yfinance_session()
+    data = []
+    
+    unique_stocks = []
+    for s in portfolio_stocks:
+        cleaned = str(s).strip().upper()
+        cleaned = re.sub(r"\b(LTD|LIMITED|CORP|CORPORATION|INC|INDUSTRIES|INDS)\b.*", "", cleaned).strip()
+        if cleaned and cleaned not in unique_stocks:
+            unique_stocks.append(cleaned)
+            
+    for stock in unique_stocks[:5]:
+        sym = stock if stock.endswith((".NS", ".BO")) else f"{stock}.NS"
+        try:
+            t = yf.Ticker(sym, session=session)
+            info = t.info
+            if not info:
+                continue
+                
+            pe = info.get("trailingPE") or info.get("forwardPE") or 0.0
+            
+            roe_val = info.get("returnOnEquity")
+            roe = (roe_val * 100) if roe_val else 0.0
+            
+            de_val = info.get("debtToEquity")
+            de = (de_val / 100.0) if de_val and de_val > 2.0 else (de_val or 0.0)
+            
+            eps_g_val = info.get("earningsGrowth")
+            eps_g = (eps_g_val * 100) if eps_g_val else 0.0
+            
+            cfo = info.get("operatingCashflow")
+            pat = info.get("netIncomeToCommon")
+            cfo_pat = (cfo / pat) if (cfo and pat) else 0.0
+            
+            mcap_val = info.get("marketCap")
+            mcap_cr = (mcap_val / 10_000_000) if mcap_val else 0.0
+            
+            data.append({
+                "ticker": stock,
+                "name": info.get("longName", stock),
+                "sector": info.get("sector", "Unknown"),
+                "pe_ratio": round(pe, 2) if pe else "N/A",
+                "eps_growth": round(eps_g, 2) if eps_g else "N/A",
+                "debt_to_equity": round(de, 2) if de else 0.0,
+                "roe": round(roe, 2) if roe else "N/A",
+                "cfo_pat_ratio": round(cfo_pat, 2) if cfo_pat else "N/A",
+                "market_cap_cr": mcap_cr
+            })
+        except Exception as e:
+            logging.error(f"Error fetching fundamentals for {sym}: {e}")
+            
+    if not data:
+        return []
+        
+    # Send these metrics to GPT to categorize and write professional insights
+    prompt = f"""You are a CFA-level equity analyst. Analyze the following actual financial metrics of these companies:
+{json.dumps(data, indent=2)}
+
+For each company:
+1. Rate its overall strength as "strong", "moderate", or "weak".
+2. Categorize the ratios:
+   - "pe_color": "good" if PE < 25, "warn" if 25-40, "bad" if > 40
+   - "eps_color": "good" if EPS growth > 15, "warn" if 5-15, "bad" if < 5
+   - "de_color": "good" if D/E < 0.5, "warn" if 0.5-1.0, "bad" if > 1.0
+   - "roe_color": "good" if ROE > 20, "warn" if 12-20, "bad" if < 12
+3. Write a professional 2-sentence fundamental insight about the company's financial health based on these numbers.
+
+Return ONLY a JSON array with the same number of objects as input, but adding these fields:
+- "strength": "strong" | "moderate" | "weak"
+- "pe_color": "good" | "warn" | "bad"
+- "eps_color": "good" | "warn" | "bad"
+- "de_color": "good" | "warn" | "bad"
+- "roe_color": "good" | "warn" | "bad"
+- "insight": 2-sentence insight
+
+Return ONLY the JSON array, no other text."""
+
+    result = call_gpt([{"role": "user", "content": prompt}], max_tokens=2000)
+    if not result:
+        # Fallback
+        for item in data:
+            item["strength"] = "moderate"
+            item["pe_color"] = "warn"
+            item["eps_color"] = "warn"
+            item["de_color"] = "warn"
+            item["roe_color"] = "warn"
+            item["insight"] = "Fundamental data loaded from live sources."
+        return data
+        
+    try:
+        clean = result.strip()
+        if clean.startswith("```"):
+            clean = re.sub(r"```json?|```", "", clean).strip()
+        return json.loads(clean)
+    except Exception as e:
+        logging.error(f"Error parsing fundamentals insights: {e}")
+        for item in data:
+            item["strength"] = "moderate"
+            item["pe_color"] = "warn"
+            item["eps_color"] = "warn"
+            item["de_color"] = "warn"
+            item["roe_color"] = "warn"
+            item["insight"] = "Fundamental data loaded from live sources."
+        return data
+
+@st.cache_data(ttl=1800)
+def run_screener_real(budget, risk, sector, portfolio_str):
+    if yf is None:
+        return []
+        
+    session = get_yfinance_session()
+    
+    # We screen from a pool of 45 high-quality tickers
+    pool = [
+        "TCS.NS", "INFY.NS", "HCLTECH.NS", "WIPRO.NS", "COFORGE.NS",
+        "HDFCBANK.NS", "ICICIBANK.NS", "AXISBANK.NS", "KOTAKBANK.NS", "SBIN.NS", "BAJFINANCE.NS",
+        "HINDUNILVR.NS", "ITC.NS", "NESTLEIND.NS", "BRITANNIA.NS", "TATACONSUM.NS", "VBL.NS",
+        "SUNPHARMA.NS", "CIPLA.NS", "DRREDDY.NS", "APOLLOHOSP.NS", "DIVISLAB.NS",
+        "M&M.NS", "MARUTI.NS", "EICHERMOT.NS", "HEROMOTOCO.NS", "BAJAJ-AUTO.NS",
+        "LT.NS", "SIEMENS.NS", "ABB.NS", "BEL.NS",
+        "TATASTEEL.NS", "JSWSTEEL.NS", "HINDALCO.NS", "ULTRACEMCO.NS", "GRASIM.NS", "PIDILITIND.NS",
+        "RELIANCE.NS", "NTPC.NS", "POWERGRID.NS", "ONGC.NS", "COALINDIA.NS", "BPCL.NS"
+    ]
+    
+    # Fetch metrics concurrently
+    raw_results = []
+    from concurrent.futures import ThreadPoolExecutor
+    
+    def fetch_one(ticker):
+        try:
+            t = yf.Ticker(ticker, session=session)
+            info = t.info
+            if info:
+                return info
+        except Exception as e:
+            logging.error(f"Screener fetch error for {ticker}: {e}")
+        return None
+        
+    with ThreadPoolExecutor(max_workers=20) as executor:
+        results = executor.map(fetch_one, pool)
+        for r in results:
+            if r:
+                raw_results.append(r)
+                
+    # Now filter programmatically in Python against criteria:
+    # 1. Market Cap > ₹1,000 Crores
+    # 2. Sales CAGR > 10% (YoY)
+    # 3. EPS CAGR > 10% (YoY)
+    # 4. ROE > 20%
+    # 5. D/E < 0.5
+    
+    screened_candidates = []
+    for info in raw_results:
+        ticker = info.get("symbol", "").replace(".NS", "")
+        name = info.get("longName", ticker)
+        sec = info.get("sector", "Unknown")
+        
+        # MCAP
+        mcap_val = info.get("marketCap")
+        mcap_cr = (mcap_val / 10_000_000) if mcap_val else 0.0
+        mcap_pass = mcap_cr > 1000
+        
+        # Sales YoY growth
+        rev_g = info.get("revenueGrowth")
+        sales_g = (rev_g * 100) if rev_g else 0.0
+        sales_pass = sales_g > 10.0
+        
+        # EPS YoY growth
+        earn_g = info.get("earningsGrowth")
+        eps_g = (earn_g * 100) if earn_g else 0.0
+        eps_pass = eps_g > 10.0
+        
+        # ROE
+        roe_val = info.get("returnOnEquity")
+        roe = (roe_val * 100) if roe_val else 0.0
+        roe_pass = roe > 20.0
+        
+        # Debt/Equity
+        de_val = info.get("debtToEquity")
+        de = (de_val / 100.0) if de_val and de_val > 2.0 else (de_val or 0.0)
+        de_pass = de < 0.5
+        
+        # Determine criteria pass list
+        criteria_pass = [mcap_pass, sales_pass, eps_pass, roe_pass, de_pass]
+        score = sum(1 for p in criteria_pass if p)
+        
+        screened_candidates.append({
+            "ticker": ticker,
+            "name": name,
+            "sector": sec,
+            "market_cap_cr": mcap_cr,
+            "sales_cagr_5y": sales_g,
+            "eps_cagr_5y": eps_g,
+            "avg_roe_5y": roe,
+            "debt_to_equity": de,
+            "criteria_pass": criteria_pass,
+            "score": score
+        })
+        
+    # Sort candidates by score descending, then by ROE descending
+    screened_candidates.sort(key=lambda x: (x["score"], x["avg_roe_5y"]), reverse=True)
+    
+    # Filter by selected sector if applicable
+    if sector != "All Sectors":
+        sector_mapping = {
+            "Banking & Finance": ["Financial", "Bank", "Capital"],
+            "Technology": ["Tech", "Software", "IT"],
+            "FMCG": ["Consumer Defensive", "FMCG", "Beverages", "Food"],
+            "Healthcare": ["Healthcare", "Pharma", "Biotech"],
+            "Infrastructure": ["Industrials", "Construction", "Utilities", "Infrastructure"],
+            "Auto": ["Consumer Cyclical", "Auto"]
+        }
+        keywords = sector_mapping.get(sector, [])
+        sector_candidates = [c for c in screened_candidates if any(k.lower() in c["sector"].lower() for k in keywords)]
+        if len(sector_candidates) >= 4:
+            selected_stocks = sector_candidates[:6]
+        else:
+            selected_stocks = screened_candidates[:6]
+    else:
+        selected_stocks = screened_candidates[:6]
+        
+    if len(selected_stocks) < 6:
+        for c in screened_candidates:
+            if c not in selected_stocks:
+                selected_stocks.append(c)
+            if len(selected_stocks) == 6:
+                break
+                
+    selected_stocks = selected_stocks[:6]
+    
+    prompt = f"""You are a top Indian equity research analyst. The user has a monthly investment budget of ₹{budget:,}.
+Risk profile: {risk}. Sector Preference: {sector}.
+User's current portfolio for context: {portfolio_str}
+
+Below are the 6 selected stocks from our real-time screener along with their factual metrics:
+{json.dumps(selected_stocks, indent=2)}
+
+Please perform the following:
+1. Allocate the monthly budget of ₹{budget:,} among these 6 stocks. Set "invest_amount" for each stock in INR (integers) such that they sum exactly to {budget}. Set "invest_pct" as the percentage of the budget (integer).
+2. Set "conviction" as "Strong Buy", "High", or "Medium".
+3. Write a professional 2-sentence investment rationale for each stock.
+
+Return ONLY a JSON array of 6 objects, matching the order of input, each having:
+- "rank": 1 to 6
+- "ticker": Stock ticker
+- "name": Company name
+- "sector": Sector
+- "market_cap_cr": Market cap in crores (from input)
+- "sales_cagr_5y": CAGR % (from input)
+- "eps_cagr_5y": EPS CAGR % (from input)
+- "avg_roe_5y": ROE % (from input)
+- "debt_to_equity": D/E ratio (from input)
+- "invest_amount": recommended monthly invest in INR (number)
+- "invest_pct": percentage of budget (number)
+- "conviction": "Strong Buy" | "High" | "Medium"
+- "rationale": 2-sentence rationale
+- "criteria_pass": array of 5 booleans (from input)
+
+Return ONLY the JSON array, no other text."""
+
+    result = call_gpt([{"role": "user", "content": prompt}], max_tokens=3000)
+    if not result:
+        alloc_amt = int(budget / 6)
+        for i, item in enumerate(selected_stocks):
+            item["rank"] = i + 1
+            item["invest_amount"] = alloc_amt
+            item["invest_pct"] = round(100 / 6)
+            item["conviction"] = "High"
+            item["rationale"] = "Solid fundamentals screened from live market."
+        return selected_stocks
+        
+    try:
+        clean = result.strip()
+        if clean.startswith("```"):
+            clean = re.sub(r"```json?|```", "", clean).strip()
+        return json.loads(clean)
+    except Exception as e:
+        logging.error(f"Error parsing screener GPT response: {e}")
+        alloc_amt = int(budget / 6)
+        for i, item in enumerate(selected_stocks):
+            item["rank"] = i + 1
+            item["invest_amount"] = alloc_amt
+            item["invest_pct"] = round(100 / 6)
+            item["conviction"] = "High"
+            item["rationale"] = "Solid fundamentals screened from live market."
+        return selected_stocks
 
 # ── GLOBAL STYLES ─────────────────────────────────────────────────────────────
 st.markdown("""
