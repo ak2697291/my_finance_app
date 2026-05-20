@@ -75,20 +75,25 @@ except Exception as err:
     st.caption(f"System Message: {str(err)}")
     st.stop()
 
-# 4. Live Global Metrics Metrics Calculation
+# 4. Live Global Metrics Calculation
 try:
-    val_col = [c for c in df_summary.columns if 'value' in c.lower() or 'allocation' in c.lower()][0]
-    inv_col = [c for c in df_invested.columns if 'invested' in c.lower()][0]
-    cur_col = [c for c in df_invested.columns if 'current' in c.lower() and 'value' in c.lower()][0]
+    inv_match = [c for c in df_invested.columns if 'invested' in c.lower()]
+    cur_match = [c for c in df_invested.columns if 'current' in c.lower() and 'value' in c.lower()]
 
-    total_invested_calc = pd.to_numeric(df_invested[inv_col], errors='coerce').sum()
-    total_current_calc = pd.to_numeric(df_invested[cur_col], errors='coerce').sum()
-    net_pl_calc = total_current_calc - total_invested_calc
-    pl_pct_calc = (net_pl_calc / total_invested_calc) * 100 if total_invested_calc > 0 else 0
+    if inv_match and cur_match:
+        inv_col = inv_match[0]
+        cur_col = cur_match[0]
 
-    col1, col2 = st.columns(2)
-    col1.metric("Live Market Value", f"₹{total_current_calc:,.2f}", f"+{pl_pct_calc:.2f}%")
-    col2.metric("Absolute P&L", f"₹{net_pl_calc:,.2f}")
+        total_invested_calc = pd.to_numeric(df_invested[inv_col], errors='coerce').sum()
+        total_current_calc = pd.to_numeric(df_invested[cur_col], errors='coerce').sum()
+        net_pl_calc = total_current_calc - total_invested_calc
+        pl_pct_calc = (net_pl_calc / total_invested_calc) * 100 if total_invested_calc > 0 else 0
+
+        col1, col2 = st.columns(2)
+        col1.metric("Live Market Value", f"₹{total_current_calc:,.2f}", f"+{pl_pct_calc:.2f}%")
+        col2.metric("Absolute P&L", f"₹{net_pl_calc:,.2f}")
+    else:
+        st.info("📊 Add 'Invested' and 'Current Value' columns to compute summary cards.")
 except Exception as map_err:
     st.warning("📊 Dashboard metrics displaying raw layout frame.")
 
@@ -97,45 +102,66 @@ tab1, tab2, tab3, tab4 = st.tabs(["📈 Holdings", "📊 Assets", "🎯 Strategy
 
 with tab1:
     st.subheader("Asset Performance Matrix")
-    status_col = [c for c in df_invested.columns if 'status' in c.lower()][0]
-    unique_statuses = ["ALL"] + list(df_invested[status_col].dropna().unique())
-    status_filter = st.selectbox("Filter Status", unique_statuses)
     
-    df_filtered = df_invested.copy()
-    if status_filter != "ALL":
-        df_filtered = df_filtered[df_filtered[status_col] == status_filter]
-    st.dataframe(df_filtered.set_index(df_filtered.columns[0]), use_container_width=True)
+    # Safely scan for a status column to avoid IndexError
+    status_match = [c for c in df_invested.columns if 'status' in c.lower() or 'state' in c.lower() or 'type' in c.lower()]
+    
+    if status_match:
+        status_col = status_match[0]
+        unique_statuses = ["ALL"] + list(df_invested[status_col].dropna().unique())
+        status_filter = st.selectbox("Filter Status", unique_statuses)
+        
+        df_filtered = df_invested.copy()
+        if status_filter != "ALL":
+            df_filtered = df_filtered[df_filtered[status_col] == status_filter]
+        st.dataframe(df_filtered.set_index(df_filtered.columns[0]), use_container_width=True)
+    else:
+        st.caption("💡 Tip: Add a 'Status' column to your Google Sheet to enable dynamic filtering.")
+        st.dataframe(df_invested.set_index(df_invested.columns[0]), use_container_width=True)
 
 with tab2:
     st.subheader("Live Allocation Spread")
     label_col = df_summary.columns[0]
-    st.bar_chart(data=df_summary, x=label_col, y=val_col)
+    val_match = [c for c in df_summary.columns if 'value' in c.lower() or 'allocation' in c.lower() or 'amount' in c.lower()]
+    
+    if val_match:
+        val_col = val_match[0]
+        st.bar_chart(data=df_summary, x=label_col, y=val_col)
     st.dataframe(df_summary.set_index(label_col), use_container_width=True)
 
 with tab3:
     st.subheader("Rules-Based Target Planner")
-    pct_col = [c for c in df_strategy.columns if '%' in c or 'target' in c.lower() or 'allocation' in c.lower()][0]
+    
+    pct_match = [c for c in df_strategy.columns if '%' in c or 'target' in c.lower() or 'allocation' in c.lower()]
     cat_col = df_strategy.columns[0]
     
-    salary_row = df_strategy[df_strategy[cat_col].str.contains('Salary|Income', case=False, na=False)]
-    base_salary = 130000 
-    if not salary_row.empty:
-        val_idx = [c for c in df_strategy.columns if c != cat_col and c != pct_col][0]
-        base_salary = pd.to_numeric(salary_row.iloc[0][val_idx], errors='coerce') or 130000
+    if pct_match:
+        pct_col = pct_match[0]
+        salary_row = df_strategy[df_strategy[cat_col].str.contains('Salary|Income', case=False, na=False)]
+        base_salary = 130000 
+        
+        if not salary_row.empty:
+            val_idx = [c for c in df_strategy.columns if c != cat_col and c != pct_col][0]
+            base_salary = pd.to_numeric(salary_row.iloc[0][val_idx], errors='coerce') or 130000
 
-    target_invest = st.slider("Modify Monthly Target (₹)", int(base_salary*0.1), int(base_salary*0.9), int(base_salary*0.6), step=2000)
-    st.markdown(f"**Target Breakdown for ₹{target_invest:,}:**")
-    
-    strategy_rows = df_strategy[~df_strategy[cat_col].str.contains('Salary|Expense|Total|Cash', case=False, na=False)]
-    for _, row in strategy_rows.iterrows():
-        raw_pct = row[pct_col]
-        if isinstance(raw_pct, str):
-            pct_val = float(raw_pct.replace('%', '')) / 100 if '%' in raw_pct else float(raw_pct)
-        else:
-            pct_val = float(raw_pct) if float(raw_pct) <= 1 else float(raw_pct) / 100
-            
-        calculated_allocation = target_invest * pct_val
-        st.write(f"▪️ **{row[cat_col]} ({pct_val*100:.1f}%):** ₹{calculated_allocation:,.2f}")
+        target_invest = st.slider("Modify Monthly Target (₹)", int(base_salary*0.1), int(base_salary*0.9), int(base_salary*0.6), step=2000)
+        st.markdown(f"**Target Breakdown for ₹{target_invest:,}:**")
+        
+        strategy_rows = df_strategy[~df_strategy[cat_col].str.contains('Salary|Expense|Total|Cash', case=False, na=False)]
+        for _, row in strategy_rows.iterrows():
+            raw_pct = row[pct_col]
+            try:
+                if isinstance(raw_pct, str):
+                    pct_val = float(raw_pct.replace('%', '')) / 100 if '%' in raw_pct else float(raw_pct)
+                else:
+                    pct_val = float(raw_pct) if float(raw_pct) <= 1 else float(raw_pct) / 100
+                    
+                calculated_allocation = target_invest * pct_val
+                st.write(f"▪️ **{row[cat_col]} ({pct_val*100:.1f}%):** ₹{calculated_allocation:,.2f}")
+            except Exception:
+                continue
+    else:
+        st.dataframe(df_strategy.set_index(cat_col), use_container_width=True)
 
 with tab4:
     st.subheader("Aggregated Financial Footprint")
