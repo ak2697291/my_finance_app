@@ -136,9 +136,12 @@ with tab3:
     
     if pct_match:
         pct_col = pct_match[0]
-        salary_row = df_strategy[df_strategy[cat_col].str.contains('Salary|Income', case=False, na=False)]
-        base_salary = 130000 
         
+        # FIX: Safe casting to string to prevent AttributeError on non-string column types
+        strategy_categories_str = df_strategy[cat_col].astype(str)
+        salary_row = df_strategy[strategy_categories_str.str.contains('Salary|Income', case=False, na=False)]
+        
+        base_salary = 130000 
         if not salary_row.empty:
             # Safely look for a column that isn't category or percentage to fetch salary
             val_indices = [c for c in df_strategy.columns if c != cat_col and c != pct_col]
@@ -149,7 +152,8 @@ with tab3:
         target_invest = st.slider("Modify Monthly Target (₹)", int(base_salary*0.1), int(base_salary*0.9), int(base_salary*0.6), step=2000)
         st.markdown(f"**Target Breakdown for ₹{target_invest:,}:**")
         
-        strategy_rows = df_strategy[~df_strategy[cat_col].str.contains('Salary|Expense|Total|Cash', case=False, na=False)]
+        # Apply identical string safety casting while slicing down non-essential rows
+        strategy_rows = df_strategy[~strategy_categories_str.str.contains('Salary|Expense|Total|Cash', case=False, na=False)]
         for _, row in strategy_rows.iterrows():
             raw_pct = row[pct_col]
             try:
