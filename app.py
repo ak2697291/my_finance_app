@@ -1,108 +1,81 @@
 import streamlit as st
-from streamlit_gsheets import GSheetsConnection
 import pandas as pd
 import logging
 import sys
+import urllib.parse
 
-# Configure standard logging to output straight to the Streamlit console logs
+# Set up logging tracking
 logging.basicConfig(
-    stream=sys.stdout,
-    level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] - %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
+    stream=sys.stdout, level=logging.INFO, format='%(asctime)s [%(levelname)s] - %(message)s'
 )
 
 st.set_page_config(
-    page_title="Finance Management Debug",
+    page_title="My Portfolio Hub",
     page_icon="📊",
     layout="centered", 
     initial_sidebar_state="collapsed"
 )
 
-# Deep-clean UI canvas for mobile viewports
+# Custom mobile interface adjustments
 st.markdown("""
     <style>
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
     header {visibility: hidden;}
     div.block-container{padding-top:1.5rem; padding-bottom:1.5rem;}
+    [data-testid="stMetricValue"] {font-size: 1.7rem; font-weight: bold;}
     </style>
 """, unsafe_allow_html=True)
 
 st.title("📱 Live Portfolio Hub")
 
-# 1. Check Secrets Configuration
-logging.info("--- STARTING WORKSHEET EXTRACTION PIPELINE ---")
+# 1. Pull Base Link from Secrets Safely
 try:
-    SPREADSHEET_URL = st.secrets["SPREADSHEET_URL"]
-    logging.info("SUCCESS: 'SPREADSHEET_URL' successfully retrieved from Secrets.")
+    base_url = st.secrets["SPREADSHEET_URL"]
+    # Clean up trailing forward slashes or edits if any remain
+    if base_url.endswith("/edit"):
+        base_url = base_url[:-5]
+    if base_url.endswith("/"):
+        base_url = base_url[:-1]
 except KeyError:
-    logging.error("CRITICAL: 'SPREADSHEET_URL' key is completely missing from Secrets dashboard!")
-    st.error("Missing Environment Secret: Please add 'SPREADSHEET_URL' to your Streamlit dashboard secrets.")
+    st.error("Missing Environment Secret: Please add 'SPREADSHEET_URL' to your Secrets dashboard.")
     st.stop()
 
-# 2. Establish Connection Engine
-logging.info("Initializing GSheetsConnection engine...")
-conn = st.connection("gsheets", type=GSheetsConnection)
-
-# Helper function to load and print sheet structures to logs
-def debug_load_sheet(sheet_name):
-    logging.info(f"Attempting live fetch for tab name: '{sheet_name}'")
-    try:
-        # Lowering cache TTL to 5 seconds during active debugging
-        df = conn.read(spreadsheet=SPREADSHEET_URL, worksheet=sheet_name, ttl=5)
-        logging.info(f"SUCCESS: Fetched '{sheet_name}'. Shape: {df.shape}. Columns found: {list(df.columns)}")
-        return df
-    except Exception as raw_error:
-        logging.error(f"FAILURE: Could not read sheet '{sheet_name}'. Details: {str(raw_error)}")
-        # Raise exception to catch globally inside app
-        raise raw_error
-
-# 3. Step-by-Step Data Extraction
-data_loaded = True
-error_diagnostics = {}
-
-sheets_to_load = ["invested", "StockMarketPortfolioSummary", "investmentStrategy", "TotalWealth"]
-loaded_dfs = {}
-
-for sheet in sheets_to_load:
-    try:
-        loaded_dfs[sheet] = debug_load_sheet(sheet)
-    except Exception as e:
-        data_loaded = False
-        error_diagnostics[sheet] = str(e)
-
-# If any tab fails, present a rich error screen on your phone to pinpoint the exact failure point
-if not data_loaded:
-    st.error("❌ Connection Pipeline Blocked")
-    st.markdown("### 🔍 Diagnostic Report")
-    st.write("The connection engine reached Google, but failed to process individual tabs. Check the status matrix below:")
+# 2. Resilient Direct CSV Streaming Engine 
+@st.cache_data(ttl=30)
+def load_sheet_tab(tab_name):
+    logging.info(f"Connecting to live worksheet tab: '{tab_name}'")
+    # Encode tab name properly for URL requests
+    encoded_tab = urllib.parse.quote(tab_name)
+    export_url = f"{base_url}/gviz/tq?tqx=out:csv&sheet={encoded_tab}"
     
-    for sheet in sheets_to_load:
-        if sheet in loaded_dfs:
-            st.success(f"**Tab '{sheet}':** Loaded perfectly ({len(loaded_dfs[sheet])} rows detected)")
-        else:
-            st.error(f"**Tab '{sheet}':** FAILED")
-            st.code(f"Error Message: {error_diagnostics.get(sheet)}")
-            
-    st.info("💡 **Next Step:** Check the 'Manage app' console log pane in the bottom right corner of your Streamlit Cloud web dashboard to see the full system stack trace.")
+    df = pd.read_csv(export_url)
+    if df.empty:
+        raise ValueError(f"Tab '{tab_name}' returned an empty dataset structure.")
+    return df
+
+# 3. Synchronous Loading Phase
+try:
+    df_invested = load_sheet_tab("invested")
+    df_summary = load_sheet_tab("StockMarketPortfolioSummary")
+    df_strategy = load_sheet_tab("investmentStrategy")
+    df_wealth = load_sheet_tab("TotalWealth")
+    
+    # Clean up any full blank padding rows
+    df_invested = df_invested.dropna(subset=[df_invested.columns[0]])
+    df_summary = df_summary.dropna(subset=[df_summary.columns[0]])
+    df_strategy = df_strategy.dropna(subset=[df_strategy.columns[0]])
+    df_wealth = df_wealth.dropna(subset=[df_wealth.columns[0]])
+    
+except Exception as err:
+    logging.error(f"Data stream crash: {str(err)}")
+    st.error("❌ Link Resolution Error")
+    st.write("The app couldn't process the sheets cleanly. Double check that your tab names match perfectly:")
+    st.code("invested\nStockMarketPortfolioSummary\ninvestmentStrategy\nTotalWealth")
+    st.caption(f"System Message: {str(err)}")
     st.stop()
 
-# Assign successfully loaded dataframes
-df_invested = loaded_dfs["invested"]
-df_summary = loaded_dfs["StockMarketPortfolioSummary"]
-df_strategy = loaded_dfs["investmentStrategy"]
-df_wealth = loaded_dfs["TotalWealth"]
-
-# Clean up trailing structural padding rows
-df_invested = df_invested.dropna(subset=[df_invested.columns[0]])
-df_summary = df_summary.dropna(subset=[df_summary.columns[0]])
-df_strategy = df_strategy.dropna(subset=[df_strategy.columns[0]])
-df_wealth = df_wealth.dropna(subset=[df_wealth.columns[0]])
-
-logging.info("All sheets successfully parsed and sanitized. Building layouts...")
-
-# 4. Global Performance Cards Engine
+# 4. Live Global Metrics Metrics Calculation
 try:
     val_col = [c for c in df_summary.columns if 'value' in c.lower() or 'allocation' in c.lower()][0]
     inv_col = [c for c in df_invested.columns if 'invested' in c.lower()][0]
@@ -116,19 +89,17 @@ try:
     col1, col2 = st.columns(2)
     col1.metric("Live Market Value", f"₹{total_current_calc:,.2f}", f"+{pl_pct_calc:.2f}%")
     col2.metric("Absolute P&L", f"₹{net_pl_calc:,.2f}")
-except Exception as layout_err:
-    logging.error(f"CRITICAL: Structural mapping error while computing dashboard layout columns: {str(layout_err)}")
-    st.error(f"Data mapping discrepancy: {str(layout_err)}")
-    st.stop()
+except Exception as map_err:
+    st.warning("📊 Dashboard metrics displaying raw layout frame.")
 
-# 5. Mobile Tab Selection Elements
+# 5. Mobile Layout Views
 tab1, tab2, tab3, tab4 = st.tabs(["📈 Holdings", "📊 Assets", "🎯 Strategy", "💰 Net Worth"])
 
 with tab1:
     st.subheader("Asset Performance Matrix")
     status_col = [c for c in df_invested.columns if 'status' in c.lower()][0]
     unique_statuses = ["ALL"] + list(df_invested[status_col].dropna().unique())
-    status_filter = st.selectbox("Filter Position Status", unique_statuses)
+    status_filter = st.selectbox("Filter Status", unique_statuses)
     
     df_filtered = df_invested.copy()
     if status_filter != "ALL":
@@ -170,4 +141,4 @@ with tab4:
     st.subheader("Aggregated Financial Footprint")
     w_cat = df_wealth.columns[0]
     st.dataframe(df_wealth.set_index(w_cat), use_container_width=True)
-    st.caption("🔄 Secure Diagnostic Build.")
+    st.caption("🔄 Secure Dynamic Sync Active.")
