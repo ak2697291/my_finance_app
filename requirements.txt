@@ -1,3 +1,7 @@
 streamlit
 st-gsheets-connection
 pandas
+yfinance
+curl_cffi
+requests
+numpy

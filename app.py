@@ -979,7 +979,7 @@ with tab4:
 
 # ── TAB 5: MARKET INTEL ───────────────────────────────────────────────────────
 with tab5:
-    st.markdown('<div class="ai-badge">◈ GPT-5 Powered · Live Web Intelligence · Auto-curated</div>', unsafe_allow_html=True)
+    st.markdown('<div class="ai-badge">◈ Live Market Intelligence · Real-time Data · AI-Analyzed</div>', unsafe_allow_html=True)
 
     # On mobile, stack news and fundamentals vertically
     # Use ratio 1:1 on desktop; they stack automatically on mobile via CSS
@@ -988,31 +988,6 @@ with tab5:
     # ── NEWS SECTION ──
     with col_news:
         st.markdown('<div class="sec-header"><span class="sec-title">Market Headlines</span><div class="sec-line"></div></div>', unsafe_allow_html=True)
-
-        @st.cache_data(ttl=300)
-        def fetch_news_gpt(stocks_str):
-            prompt = f"""You are a financial news analyst. For the following Indian stock portfolio: {stocks_str}
-
-Generate 6 realistic, current-style news headlines and summaries for these stocks as if they are from today {datetime.now().strftime('%B %Y')}.
-
-Return ONLY a JSON array with exactly 6 objects, each having:
-- "ticker": stock symbol (e.g. "RELIANCE", "TCS")
-- "headline": compelling news headline (max 12 words)
-- "source": news source name (e.g. "Economic Times", "Moneycontrol", "Bloomberg Quint")
-- "time": relative time (e.g. "2h ago", "4h ago")
-- "summary": 2-sentence summary of the news
-- "sentiment": "positive", "negative", or "neutral"
-- "url": a realistic financial news URL
-
-Return ONLY the JSON array, no other text."""
-            result = call_gpt([{"role": "user", "content": prompt}], max_tokens=1500)
-            if not result: return []
-            try:
-                clean = result.strip()
-                if clean.startswith("```"): clean = re.sub(r"```json?|```", "", clean).strip()
-                return json.loads(clean)
-            except:
-                return []
 
         if "news_data" not in st.session_state:
             st.session_state.news_data = []
@@ -1027,7 +1002,7 @@ Return ONLY the JSON array, no other text."""
 
         if not st.session_state.news_data:
             with st.spinner("🔍 Fetching market intelligence..."):
-                st.session_state.news_data = fetch_news_gpt(portfolio_str)
+                st.session_state.news_data = fetch_news_real(portfolio_stocks)
 
         news_data = st.session_state.news_data
 
@@ -1086,43 +1061,12 @@ Return ONLY the JSON array, no other text."""
     with col_fund:
         st.markdown('<div class="sec-header"><span class="sec-title">Fundamentals Analysis</span><div class="sec-line"></div></div>', unsafe_allow_html=True)
 
-        @st.cache_data(ttl=600)
-        def fetch_fundamentals_gpt(stocks_str):
-            prompt = f"""You are a CFA-level equity analyst. Analyze the fundamentals of these Indian stocks: {stocks_str}
-
-For each stock (up to 5 most important ones), provide realistic fundamental data based on your knowledge of these companies.
-
-Return ONLY a JSON array where each object has:
-- "ticker": stock symbol
-- "name": company full name
-- "sector": business sector
-- "pe_ratio": P/E ratio (number)
-- "eps_growth": EPS growth % YoY (number)
-- "debt_to_equity": D/E ratio (number)
-- "roe": Return on Equity % (number)
-- "strength": "strong", "moderate", or "weak" (overall fundamental rating)
-- "pe_color": "good" if PE<25, "warn" if 25-40, "bad" if >40
-- "eps_color": "good" if EPS>15, "warn" if 5-15, "bad" if <5
-- "de_color": "good" if D/E<0.5, "warn" if 0.5-1, "bad" if >1
-- "roe_color": "good" if ROE>20, "warn" if 12-20, "bad" if <12
-- "insight": 2-sentence fundamental insight about this stock
-
-Return ONLY valid JSON array, no markdown, no extra text."""
-            result = call_gpt([{"role": "user", "content": prompt}], max_tokens=2000)
-            if not result: return []
-            try:
-                clean = result.strip()
-                if clean.startswith("```"): clean = re.sub(r"```json?|```", "", clean).strip()
-                return json.loads(clean)
-            except:
-                return []
-
         if "fund_data" not in st.session_state:
             st.session_state.fund_data = []
 
         if not st.session_state.fund_data:
             with st.spinner("🧮 Running fundamental analysis..."):
-                st.session_state.fund_data = fetch_fundamentals_gpt(portfolio_str)
+                st.session_state.fund_data = fetch_fundamentals_real(portfolio_stocks)
 
         fund_data = st.session_state.fund_data
 
@@ -1206,56 +1150,12 @@ with tab6:
     if st.button("⚡ Run Quality Screener", key="run_screener"):
         st.session_state.screener_data = None
 
-    @st.cache_data(ttl=1800)
-    def run_screener_gpt(budget, risk, sector, portfolio_str):
-        sector_note = f"Focus on {sector} sector." if sector != "All Sectors" else "Include diverse sectors."
-        prompt = f"""You are a top Indian equity research analyst. The user has a monthly investment budget of ₹{budget:,}.
-Risk profile: {risk}. {sector_note}
-User's current portfolio for context: {portfolio_str}
-
-Screen and recommend 6 high-quality Indian stocks that meet ALL these criteria:
-1. Market Cap > ₹1,000 Crores
-2. 5-year Sales CAGR > 10%
-3. 5-year EPS CAGR > 10%
-4. 5-year Average ROE > 20%
-5. 5-year Average CFO/PAT ratio > 1
-6. Debt-to-Equity ratio < 0.5
-
-For each stock, recommend how much of the ₹{budget:,} monthly budget to invest (in INR) and give a clear rationale.
-
-Return ONLY a JSON array of 6 objects, each with:
-- "rank": 1 to 6
-- "ticker": NSE symbol
-- "name": full company name
-- "sector": sector
-- "market_cap_cr": market cap in crores (number)
-- "sales_cagr_5y": 5Y sales CAGR % (number)
-- "eps_cagr_5y": 5Y EPS CAGR % (number)
-- "avg_roe_5y": 5Y average ROE % (number)
-- "cfo_pat_ratio": 5Y avg CFO/PAT ratio (number)
-- "debt_to_equity": current D/E (number)
-- "invest_amount": recommended monthly invest in INR (number, must sum close to {budget})
-- "invest_pct": percentage of budget (number)
-- "conviction": "High", "Medium" or "Strong Buy"
-- "rationale": 2-sentence investment thesis
-- "criteria_pass": array of 5 booleans for each criteria above
-
-Return ONLY the JSON array, no markdown, no extra text."""
-        result = call_gpt([{"role": "user", "content": prompt}], max_tokens=3000)
-        if not result: return []
-        try:
-            clean = result.strip()
-            if clean.startswith("```"): clean = re.sub(r"```json?|```", "", clean).strip()
-            return json.loads(clean)
-        except:
-            return []
-
     if "screener_data" not in st.session_state:
         st.session_state.screener_data = None
 
     if st.session_state.screener_data is None:
         with st.spinner("🔬 Screening 5,000+ NSE/BSE stocks against quality criteria..."):
-            st.session_state.screener_data = run_screener_gpt(monthly_budget, risk_profile, sector_pref, portfolio_str)
+            st.session_state.screener_data = run_screener_real(monthly_budget, risk_profile, sector_pref, portfolio_str)
 
     screener_data = st.session_state.screener_data
 
